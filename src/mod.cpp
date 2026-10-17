@@ -119,8 +119,9 @@ static const float GUARD_HIT_BAR_GAIN = 0.13f;   // la barra del enemigo sube es
 static const int GANON_WAIT_MAX = 8;          // Ganondorf espera como maximo esto antes de atacar
 static const float ENEMY_PARRY_POSTURE_GAIN = 0.30f;   // la barra de Link sube esto cuando un enemigo le hace parry
 static const float LINK_DAMAGE_MULT = 0.60f;   // dano de Link a los enemigos de la lista (1.0 = normal; 0.6 = 40% menos)
-static const float DARKNUT_LIFE_MULT = 2.5f;      // vida de la fase sin armadura del Darknut (1.0 = normal)
+static const float DARKNUT_LIFE_MULT = 5.0f;      // vida de la fase sin armadura del Darknut (1.0 = normal)
 static const int DARKNUT_HITS_PER_PIECE = 3;   // golpes para romper cada pieza de armadura del Darknut (1 = normal)
+static const int GANON_KNOCKDOWNS = 5;        // derribos para vencer a Ganondorf a pie (el juego usa 3)
 static const int BASH_COOLDOWN_TICKS = 30;     // espera entre golpes de escudo: 30 = 1 s
 static const int DOUBLE_TAP_TICKS = 12;        // tiempo maximo entre las dos R seguidas (12 = 0.4 s)
 static const int PLAYER_STUN_TICKS = 90;     // tiempo que Link queda aturdido (90 = 3 s)
@@ -714,6 +715,25 @@ static HookAction on_tn_set_damage_pre(ModContext*, void* args, void*, void*) {
     return HOOK_CONTINUE;
 }
 
+// Ganondorf: el juego lo da por vencido al tercer derribo (field_0x1e0c cuenta derribos y con >= 3
+// hace la caida final). Se cuentan los derribos aqui y el contador del juego se mantiene en 0
+// hasta el ultimo derribo, que se deja en 2 para que el siguiente (+1) sea el tercero.
+struct GndTrack { int prev = 0; int downs = 0; };
+static std::unordered_map<uint32_t, GndTrack> g_gnd;
+
+static void ganon_knockdowns(fopAc_ac_c* ac) {
+    b_gnd_class* g = (b_gnd_class*)ac;
+    GndTrack& t = g_gnd[(uint32_t)fopAcM_GetID(ac)];
+    int mode = g->mActionMode;
+    if (mode == 21 && t.prev != 21) t.downs++;               // DOWN: un derribo mas
+    if (mode != 21) {
+        g->field_0x1e0c = (t.downs >= GANON_KNOCKDOWNS - 1) ? 2 : 0;
+    } else if (g->field_0x1e0c >= 3) {
+        t.downs = 0;                                          // derribo final en curso
+    }
+    t.prev = mode;
+}
+
 // Dano de Link reducido: cada tick se compara la vida del enemigo con la del tick anterior;
 // si bajo, se devuelve la parte que sobra (con acumulador para no perder los decimales).
 struct HealthTrack { int last = 0; float carry = 0.0f; };
@@ -757,7 +777,10 @@ static void* tweak_enemy(void* p, void*) {
     if (ac == nullptr) return nullptr;
     s16 nm = fopAcM_GetName(ac);
 
-    if (is_parry_enemy(ac)) reduce_link_damage(ac);
+    if (is_parry_enemy(ac)) {
+        reduce_link_damage(ac);
+        if (nm == fpcNm_B_GND_e) ganon_knockdowns(ac);
+    }
 
     // Aturdido por el mod: sin guardia, y no se toca mas
     {
@@ -1297,6 +1320,7 @@ MOD_EXPORT ModResult mod_shutdown(ModError*) {
     // El loader quita los hooks solo al desactivar el mod.
     g_enemies.clear();
     g_health.clear();
+    g_gnd.clear();
     g_tnArmorHits.clear();
 #if ENEMY_TWEAKS
     g_attackMorfs.clear();
