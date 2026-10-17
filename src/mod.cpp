@@ -103,7 +103,7 @@ static const float PLAYER_BAR_DRAIN_TICKS = 7.5f;   // la barra de Link llega a 
 static const float PARRY_POSTURE_RESTORE = 0.25f;   // cada parry de Link recupera este % de su barra
 static const float ENEMY_BAR_DECAY_PER_SEC = 0.015f;   // la barra del enemigo baja 1.5%/s (la de Link: 2%/s)
 static const int PARRIES_TO_STUN = 2;        // parries para llenar la barra
-static const int STUN_TICKS = 120;           // tiempo aturdido para empezar los tajos (4 s)
+static const int STUN_TICKS = 75;            // tiempo aturdido para empezar los tajos (2.5 s)
 static const int SECOND_SLASH_TICKS = 150;    // tiempo para el segundo tajo
 static const int HOLD_AFTER_TICKS = 20;      // enemigo quieto mientras cae el segundo tajo
 static const int ATTACK_LOCK_TICKS = 0;      // sin atacar tras un parry normal (0 = desactivado; 60 = 2 s)
@@ -139,6 +139,7 @@ struct EnemyState {
     int secondTimer = 0;    // ventana del segundo tajo
     int holdTimer = 0;      // quieto mientras cae el segundo tajo
     bool lastWasA = false;
+    bool firstDone = false;   // ya hizo el primer ataque del combo (dentro del mismo aturdimiento)
     bool wasGuarding = false;   // estaba cubriendose el tick anterior
     int guardPending = 0;       // ticks para confirmar que el tajo fue bloqueado (sin parry)
     bool guardSawCut = false;
@@ -875,7 +876,7 @@ static HookAction on_execute_pre_main(ModContext*, void* args, void*, void*) {
 
         if (st.stunTimer > 0) {
             a->speedF = 0.0f;
-            if (--st.stunTimer == 0) st.parries = 0;       // se acabo el tiempo: reinicia
+            if (--st.stunTimer == 0) { st.parries = 0; st.firstDone = false; }   // se acabo el tiempo: reinicia
         } else if (st.secondTimer > 0) {
             a->speedF = 0.0f;
             if (--st.secondTimer == 0) st.parries = 0;     // no hubo segundo tajo: reinicia
@@ -905,17 +906,17 @@ static HookAction on_execute_pre_main(ModContext*, void* args, void*, void*) {
         if (stp && (stp->stunTimer > 0 || stp->secondTimer > 0)) {
             // Parry final: Mortal Draw y Helm Splitter (sin giratorio); uno termina antes del otro
             if (!busy) {
-                if (stp->stunTimer > 0) {
+                if (!stp->firstDone) {
                     launch_followup(link, trigA ? 2 : 0);   // A: Helm Splitter / B: Mortal Draw
                     stp->lastWasA = !trigA;                 // true = el primero fue Mortal Draw
-                    stp->stunTimer = 0;
-                    stp->secondTimer = SECOND_SLASH_TICKS;
+                    stp->firstDone = true;                  // el aturdimiento sigue corriendo (no se alarga)
                 } else if (stp->lastWasA ? trigA : trigB) {
-                    // segundo ataque: solo con su propio boton (A = Helm Splitter, B = Mortal Draw)
+                    // segundo ataque, dentro del mismo aturdimiento (A = Helm Splitter, B = Mortal Draw)
                     launch_followup(link, stp->lastWasA ? 2 : 0);
-                    stp->secondTimer = 0;
+                    stp->stunTimer = 0;
                     stp->holdTimer = HOLD_AFTER_TICKS;
                     stp->parries = 0;
+                    stp->firstDone = false;
                 }
             }
         } else if (trigB && g_mdWindow > 0 && !busy) {
