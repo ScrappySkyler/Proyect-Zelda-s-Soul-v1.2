@@ -75,7 +75,6 @@ DEFINE_HOOK(&daAlink_c::procGuardBreakInit, GuardBreakInit);
 DEFINE_HOOK(&daAlink_c::procGuardBreak, GuardBreakProc);
 #if ENEMY_TWEAKS
 DEFINE_HOOK(&mDoExt_McaMorfSO::play, MorfPlay);
-DEFINE_HOOK(&daAlink_c::animePlay, LinkAnimePlay);
 #endif
 DEFINE_HOOK(&daAlink_c::setSmallGuard, SmallGuard);
 DEFINE_HOOK(&daAlink_c::setShieldGuard, ShieldGuard);
@@ -584,36 +583,6 @@ static void on_morf_play_post(ModContext*, void*, void*, void*) {
     }
 }
 
-// Ataques de espada de Link mas rapidos: igual que con los enemigos, se multiplica el ritmo
-// de la animacion justo durante su avance y se devuelve el valor original despues.
-static daPy_frameCtrl_c* g_linkBoostCtrl = nullptr;
-static float g_linkBoostRate = 0.0f;
-
-static HookAction on_link_anime_play_pre(ModContext*, void* args, void*, void*) {
-    g_linkBoostCtrl = nullptr;
-    if (LINK_ATTACK_ANIM_BOOST <= 1.001f) return HOOK_CONTINUE;
-    daAlink_c* link = mods::arg<daAlink_c*>(args, 0);
-    daPy_frameCtrl_c* c = mods::arg<daPy_frameCtrl_c*>(args, 2);
-    if (link == nullptr || c == nullptr) return HOOK_CONTINUE;
-    int p = link->mProcID;
-    bool cut = (p >= daAlink_c::PROC_CUT_NORMAL && p <= daAlink_c::PROC_CUT_LARGE_JUMP_LAND) &&
-               p != daAlink_c::PROC_CUT_LARGE_JUMP_CHARGE;
-    if (!cut) return HOOK_CONTINUE;
-    float rate = c->getRate();
-    if (rate <= 0.0f) return HOOK_CONTINUE;
-    g_linkBoostCtrl = c;
-    g_linkBoostRate = rate;
-    c->setRate(rate * LINK_ATTACK_ANIM_BOOST);
-    return HOOK_CONTINUE;
-}
-
-static void on_link_anime_play_post(ModContext*, void*, void*, void*) {
-    if (g_linkBoostCtrl != nullptr) {
-        g_linkBoostCtrl->setRate(g_linkBoostRate);
-        g_linkBoostCtrl = nullptr;
-    }
-}
-
 // Un enemigo aturdido por la barra llena no puede guardar: si esta en postura de guardia
 // se le saca de ella (asi los tajos relampago le pegan).
 static void unguard_exposed(fopAc_ac_c* ac, s16 nm) {
@@ -745,7 +714,7 @@ static bool link_in_combo_attack(daAlink_c* link) {
 }
 
 // Cada tick de Link.
-static HookAction on_execute_pre(ModContext*, void* args, void*, void*) {
+static HookAction on_execute_pre_main(ModContext*, void* args, void*, void*) {
     daAlink_c* link = mods::arg<daAlink_c*>(args, 0);
 
     if (g_parryTimer > 0) g_parryTimer--;
@@ -863,7 +832,40 @@ static HookAction on_execute_pre(ModContext*, void* args, void*, void*) {
     return HOOK_CONTINUE;
 }
 
+// Ataques de espada de Link mas rapidos: durante el tick de Link se multiplica el ritmo de
+// sus animaciones de corte y al terminar el tick se devuelve el valor original
+// (si el juego puso una animacion nueva durante el tick, su ritmo no se toca).
+static daPy_frameCtrl_c* g_linkCtrls[6] = {};
+static float g_linkCtrlRate[6] = {};
+static float g_linkCtrlBoosted[6] = {};
+
+static HookAction on_execute_pre(ModContext* ctx, void* args, void* a, void* b) {
+    HookAction ret = on_execute_pre_main(ctx, args, a, b);
+    for (int i = 0; i < 6; i++) g_linkCtrls[i] = nullptr;
+    if (LINK_ATTACK_ANIM_BOOST <= 1.001f) return ret;
+    daAlink_c* link = mods::arg<daAlink_c*>(args, 0);
+    int p = link->mProcID;
+    bool cut = p >= daAlink_c::PROC_CUT_NORMAL && p <= daAlink_c::PROC_CUT_LARGE_JUMP_LAND &&
+               p != daAlink_c::PROC_CUT_LARGE_JUMP_CHARGE;
+    if (!cut) return ret;
+    for (int i = 0; i < 6; i++) {
+        daPy_frameCtrl_c* c = i < 3 ? &link->mUnderFrameCtrl[i] : &link->mUpperFrameCtrl[i - 3];
+        float rate = c->getRate();
+        if (rate <= 0.0f) continue;
+        g_linkCtrls[i] = c;
+        g_linkCtrlRate[i] = rate;
+        g_linkCtrlBoosted[i] = rate * LINK_ATTACK_ANIM_BOOST;
+        c->setRate(g_linkCtrlBoosted[i]);
+    }
+    return ret;
+}
+
 static void on_execute_post(ModContext*, void*, void*, void*) {
+    for (int i = 0; i < 6; i++) {
+        if (g_linkCtrls[i] != nullptr && g_linkCtrls[i]->getRate() == g_linkCtrlBoosted[i])
+            g_linkCtrls[i]->setRate(g_linkCtrlRate[i]);
+        g_linkCtrls[i] = nullptr;
+    }
     g_parryHitThisTick = false;
 }
 
@@ -1071,10 +1073,6 @@ MOD_EXPORT ModResult mod_initialize(ModError* error) {
     if ((r = mods::hook::add_pre<GuardSlipInit>(skip_if_parry)) != MOD_OK)
         return mods::set_error(error, r, "hook retroceso");
 #if ENEMY_TWEAKS
-    if ((r = mods::hook::add_pre<LinkAnimePlay>(on_link_anime_play_pre)) != MOD_OK)
-        return mods::set_error(error, r, "hook animacion de Link (pre)");
-    if ((r = mods::hook::add_post<LinkAnimePlay>(on_link_anime_play_post)) != MOD_OK)
-        return mods::set_error(error, r, "hook animacion de Link (post)");
     if ((r = mods::hook::add_pre<MorfPlay>(on_morf_play_pre)) != MOD_OK)
         return mods::set_error(error, r, "hook animacion enemigos (pre)");
     if ((r = mods::hook::add_post<MorfPlay>(on_morf_play_post)) != MOD_OK)
