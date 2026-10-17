@@ -76,6 +76,9 @@ DEFINE_HOOK(&daAlink_c::procGuardBreak, GuardBreakProc);
 #if ENEMY_TWEAKS
 DEFINE_HOOK(&mDoExt_McaMorfSO::play, MorfPlay);
 #endif
+#if ENEMY_TWEAKS
+DEFINE_HOOK(&daB_TN_c::setDamage, TnSetDamage);
+#endif
 DEFINE_HOOK(&daAlink_c::setSmallGuard, SmallGuard);
 DEFINE_HOOK(&daAlink_c::setShieldGuard, ShieldGuard);
 // Ataques con espada que se bloquean tras un parry
@@ -693,18 +696,41 @@ static void guard_bar_tick(fopAc_ac_c* ac, s16 nm) {
     }
 }
 
+// Darknut: cada pieza de armadura necesita 2 golpes. El juego rompe una pieza por golpe
+// (setDamage suma 1 a mNextBreakPart); en los golpes impares se le pasa 0, asi la pieza aguanta.
+static std::unordered_map<uint32_t, int> g_tnArmorHits;
+
+static HookAction on_tn_set_damage_pre(ModContext*, void* args, void*, void*) {
+    daB_TN_c* tn = mods::arg<daB_TN_c*>(args, 0);
+    int& amount = mods::arg_ref<int>(args, 2);
+    if (tn == nullptr || amount != 1) return HOOK_CONTINUE;          // bombas (2) no se tocan
+    if (tn->mActionMode1 >= 8 || tn->mNextBreakPart >= 11) return HOOK_CONTINUE;   // solo con armadura
+    int& hits = g_tnArmorHits[(uint32_t)fopAcM_GetID(tn)];
+    hits++;
+    if (hits & 1) amount = 0;   // 1er golpe: la armadura aguanta; 2do: se rompe
+    return HOOK_CONTINUE;
+}
+
 // Dano de Link reducido: cada tick se compara la vida del enemigo con la del tick anterior;
 // si bajo, se devuelve la parte que sobra (con acumulador para no perder los decimales).
 struct HealthTrack { int last = 0; float carry = 0.0f; };
 static std::unordered_map<uint32_t, HealthTrack> g_health;
 
 static void reduce_link_damage(fopAc_ac_c* ac) {
-    if (LINK_DAMAGE_MULT >= 0.999f) return;
+    s16 nm = fopAcM_GetName(ac);
+    // Multiplicador y tope de dano por golpe segun el enemigo (tope 0 = sin tope).
+    float mult = LINK_DAMAGE_MULT;
+    float cap = 0.0f;
+    if (nm == fpcNm_B_GND_e) { mult = 0.50f; cap = 2.0f; }        // Ganondorf: el remate del combo de B no quita de mas
+    else if (nm == fpcNm_B_TN_e) { mult = 0.35f; cap = 2.0f; }    // Darknut: peleas mas largas
+    if (mult >= 0.999f && cap <= 0.0f) return;
     HealthTrack& t = g_health[(uint32_t)fopAcM_GetID(ac)];
     int now = (int)ac->health;
     if (t.last == 0) { t.last = now; return; }              // primer tick: solo se anota
-    if (now < t.last && now > 0) {
-        float dmg = (float)(t.last - now) * LINK_DAMAGE_MULT + t.carry;
+    if (now < t.last && (now > 0 || nm == fpcNm_B_GND_e)) {
+        float dmg = (float)(t.last - now) * mult;
+        if (cap > 0.0f && dmg > cap) dmg = cap;
+        dmg += t.carry;
         int real = (int)dmg;
         t.carry = dmg - (float)real;
         now = t.last - real;
@@ -1197,6 +1223,8 @@ MOD_EXPORT ModResult mod_initialize(ModError* error) {
     if ((r = mods::hook::add_pre<GuardSlipInit>(skip_if_parry)) != MOD_OK)
         return mods::set_error(error, r, "hook retroceso");
 #if ENEMY_TWEAKS
+    if ((r = mods::hook::add_pre<TnSetDamage>(on_tn_set_damage_pre)) != MOD_OK)
+        return mods::set_error(error, r, "hook armadura del Darknut");
     if ((r = mods::hook::add_pre<MorfPlay>(on_morf_play_pre)) != MOD_OK)
         return mods::set_error(error, r, "hook animacion enemigos (pre)");
     if ((r = mods::hook::add_post<MorfPlay>(on_morf_play_post)) != MOD_OK)
@@ -1256,6 +1284,7 @@ MOD_EXPORT ModResult mod_shutdown(ModError*) {
     // El loader quita los hooks solo al desactivar el mod.
     g_enemies.clear();
     g_health.clear();
+    g_tnArmorHits.clear();
 #if ENEMY_TWEAKS
     g_attackMorfs.clear();
 #endif
