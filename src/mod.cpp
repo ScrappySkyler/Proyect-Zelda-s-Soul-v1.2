@@ -104,6 +104,7 @@ static const float PARRY_POSTURE_RESTORE = 0.25f;   // cada parry de Link recupe
 static const float ENEMY_BAR_DECAY_PER_SEC = 0.015f;   // la barra del enemigo baja 1.5%/s (la de Link: 2%/s)
 static const int PARRIES_TO_STUN = 2;        // parries para llenar la barra
 static const int STUN_TICKS = 75;            // tiempo aturdido para empezar los tajos (2.5 s)
+static const int STUN_TICKS_SHORT = 45;           // aturdimiento corto (1.5 s), 50% de probabilidad
 static const int SECOND_SLASH_TICKS = 150;    // tiempo para el segundo tajo
 static const int HOLD_AFTER_TICKS = 20;      // enemigo quieto mientras cae el segundo tajo
 static const int ATTACK_LOCK_TICKS = 0;      // sin atacar tras un parry normal (0 = desactivado; 60 = 2 s)
@@ -114,6 +115,7 @@ static const float LINK_ATTACK_ANIM_BOOST = 1.30f;   // velocidad de los ataques
 static const float GUARD_HIT_BAR_GAIN = 0.13f;   // la barra del enemigo sube esto al golpear su guardia (sin parry)
 static const int GANON_WAIT_MAX = 8;          // Ganondorf espera como maximo esto antes de atacar
 static const float ENEMY_PARRY_POSTURE_GAIN = 0.30f;   // la barra de Link sube esto cuando un enemigo le hace parry
+static const float LINK_DAMAGE_MULT = 0.60f;   // dano de Link a los enemigos de la lista (1.0 = normal; 0.6 = 40% menos)
 static const int BASH_COOLDOWN_TICKS = 30;     // espera entre golpes de escudo: 30 = 1 s
 static const int DOUBLE_TAP_TICKS = 12;        // tiempo maximo entre las dos R seguidas (12 = 0.4 s)
 static const int PLAYER_STUN_TICKS = 90;     // tiempo que Link queda aturdido (90 = 3 s)
@@ -231,6 +233,11 @@ static void on_bash_proc_post(ModContext*, void* args, void*, void*) {
 }
 
 // Un golpe pego en el escudo.
+// Duracion del aturdimiento: 50% largo (2.5 s), 50% corto (1.5 s)
+static int random_stun_ticks() {
+    return cM_rndF(1.0f) < 0.5f ? STUN_TICKS : STUN_TICKS_SHORT;
+}
+
 static HookAction on_guard_se_pre(ModContext*, void* args, void*, void*) {
     daAlink_c* link = mods::arg<daAlink_c*>(args, 0);
 
@@ -276,7 +283,7 @@ static HookAction on_guard_se_pre(ModContext*, void* args, void*, void*) {
             st.parries += 1.0f / parries_needed(target);   // la barra va de 0 a 1
             if (st.parries >= 0.9f) {   // margen: la barra baja sola
                 st.parries = 1.0f;
-                st.stunTimer = STUN_TICKS;
+                st.stunTimer = random_stun_ticks();
                 stunnedNow = true;
             }
         }
@@ -540,7 +547,7 @@ static void enemy_parry_tick(daAlink_c* link) {
             gst.parries += GUARD_HIT_BAR_GAIN;
             if (gst.parries >= 0.9f) {
                 gst.parries = 1.0f;
-                gst.stunTimer = STUN_TICKS;
+                gst.stunTimer = random_stun_ticks();
                 svc_log->info(mod_ctx, "GUARDIA golpeada: enemigo aturdido");
             }
         }
@@ -686,10 +693,32 @@ static void guard_bar_tick(fopAc_ac_c* ac, s16 nm) {
     }
 }
 
+// Dano de Link reducido: cada tick se compara la vida del enemigo con la del tick anterior;
+// si bajo, se devuelve la parte que sobra (con acumulador para no perder los decimales).
+struct HealthTrack { int last = 0; float carry = 0.0f; };
+static std::unordered_map<uint32_t, HealthTrack> g_health;
+
+static void reduce_link_damage(fopAc_ac_c* ac) {
+    if (LINK_DAMAGE_MULT >= 0.999f) return;
+    HealthTrack& t = g_health[(uint32_t)fopAcM_GetID(ac)];
+    int now = (int)ac->health;
+    if (t.last == 0) { t.last = now; return; }              // primer tick: solo se anota
+    if (now < t.last && now > 0) {
+        float dmg = (float)(t.last - now) * LINK_DAMAGE_MULT + t.carry;
+        int real = (int)dmg;
+        t.carry = dmg - (float)real;
+        now = t.last - real;
+        ac->health = (s16)now;
+    }
+    t.last = now;
+}
+
 static void* tweak_enemy(void* p, void*) {
     fopAc_ac_c* ac = (fopAc_ac_c*)p;
     if (ac == nullptr) return nullptr;
     s16 nm = fopAcM_GetName(ac);
+
+    if (is_parry_enemy(ac)) reduce_link_damage(ac);
 
     // Aturdido por el mod: sin guardia, y no se toca mas
     {
@@ -1226,6 +1255,7 @@ MOD_EXPORT ModResult mod_update(ModError*) {   // se llama cada frame
 MOD_EXPORT ModResult mod_shutdown(ModError*) {
     // El loader quita los hooks solo al desactivar el mod.
     g_enemies.clear();
+    g_health.clear();
 #if ENEMY_TWEAKS
     g_attackMorfs.clear();
 #endif
