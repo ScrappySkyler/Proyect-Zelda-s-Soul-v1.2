@@ -122,6 +122,7 @@ static const float LINK_DAMAGE_MULT = 0.60f;   // dano de Link a los enemigos de
 static const float DARKNUT_LIFE_MULT = 5.0f;      // vida de la fase sin armadura del Darknut (1.0 = normal)
 static const int DARKNUT_HITS_PER_PIECE = 3;   // golpes para romper cada pieza de armadura del Darknut (1 = normal)
 static const int GANON_KNOCKDOWNS = 5;        // derribos para vencer a Ganondorf a pie (el juego usa 3)
+static const int LINK_INVINCIBLE_TICKS = 60;   // invencibilidad de Link tras recibir un golpe (60 = 2 s)
 static const int BASH_COOLDOWN_TICKS = 30;     // espera entre golpes de escudo: 30 = 1 s
 static const int DOUBLE_TAP_TICKS = 12;        // tiempo maximo entre las dos R seguidas (12 = 0.4 s)
 static const int PLAYER_STUN_TICKS = 90;     // tiempo que Link queda aturdido (90 = 3 s)
@@ -204,6 +205,7 @@ static bool g_comboLastHead = false; // ultimo ataque del combo fue Helm Splitte
 static bool g_pendingBashAnim = false;  // hay que mostrar la animacion tras un parry
 
 // Barra de postura de Link (se llena cuando un enemigo le hace parry)
+static float g_playerHpDisp = 1.0f;     // vida de Link mostrada (suavizada)
 static float g_playerPosture = 0.0f;    // 0..1 (1 = lleno -> aturdido)
 static bool g_dieAnim = false;          // Link aturdido con la animacion de muerte
 static int g_playerStunTimer = 0;       // ticks restantes aturdido
@@ -1047,8 +1049,19 @@ static daPy_frameCtrl_c* g_linkCtrls[6] = {};
 static float g_linkCtrlRate[6] = {};
 static float g_linkCtrlBoosted[6] = {};
 
+static int g_prevDamageTimer = 0;
+
 static HookAction on_execute_pre(ModContext* ctx, void* args, void* a, void* b) {
     HookAction ret = on_execute_pre_main(ctx, args, a, b);
+    {   // Invencibilidad de Link: cuando el juego la activa (el contador sube), se pone en 2 s
+        daAlink_c* lk = mods::arg<daAlink_c*>(args, 0);
+        int dt = (int)lk->mDamageTimer;
+        if (dt > g_prevDamageTimer && dt > 1) {
+            dt = LINK_INVINCIBLE_TICKS;
+            lk->mDamageTimer = (s16)dt;
+        }
+        g_prevDamageTimer = dt;
+    }
     for (int i = 0; i < 6; i++) g_linkCtrls[i] = nullptr;
     if (LINK_ATTACK_ANIM_BOOST <= 1.001f) return ret;
     daAlink_c* link = mods::arg<daAlink_c*>(args, 0);
@@ -1096,6 +1109,7 @@ struct BarInfo {
     float ratio;     // 0..1 (relleno mostrado)
     float width;     // ancho en pixeles
     bool stunned;    // barra llena / aturdido: se ilumina
+    bool red = false;   // barra de vida de Link (relleno rojo)
 };
 static std::vector<BarInfo> g_bars;
 
@@ -1179,6 +1193,7 @@ public:
                 // Aturdido: el relleno parpadea de blanco a dorado
                 u8 gb = bar.stunned ? (u8)(255 - 110 * pulse) : (u8)255;
                 u8 bb = bar.stunned ? (u8)(255 - 200 * pulse) : (u8)255;
+                if (bar.red) { gb = 40; bb = 40; }
                 draw_quad(left + bar.width * FILL_U0, top,
                           left + bar.width * u1, top + barH,
                           FILL_U0, u1, 255, 255, gb, bb);
@@ -1220,6 +1235,15 @@ static void on_link_draw_post(ModContext*, void* args, void*, void*) {
         }
         g_playerWasStunned = stunnedP;
         g_bars.push_back({304.0f, PLAYER_BAR_Y, g_playerDispRatio, PLAYER_BAR_WIDTH, g_playerStunTimer > 0});
+
+        // Barra de vida de Link (roja), justo encima de la barra de postura
+        float maxQ = (float)((dComIfGs_getMaxLife() / 5) * 4);
+        float hp = maxQ > 0.0f ? (float)dComIfGs_getLife() / maxQ : 0.0f;
+        if (hp > 1.0f) hp = 1.0f;
+        g_playerHpDisp += (hp - g_playerHpDisp) * FILL_SMOOTHING;
+        if (std::fabs(hp - g_playerHpDisp) < 0.003f) g_playerHpDisp = hp;
+        float hpBarH = PLAYER_BAR_WIDTH * (float)BAR_TEX_H / (float)BAR_TEX_W;
+        g_bars.push_back({304.0f, PLAYER_BAR_Y - hpBarH * 1.5f, g_playerHpDisp, PLAYER_BAR_WIDTH, false, true});
     }
 
     // Enemigos fuera de la lista: solo la barra de Link, sin barra de enemigo
