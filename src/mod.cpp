@@ -111,6 +111,8 @@ static const float ENEMY_PARRY_CHANCE = 0.50f;  // probabilidad de que un enemig
 static const float ENEMY_ATTACK_ANIM_BOOST = 1.25f;   // velocidad de los movimientos de ataque enemigos (1.0 = normal)
 static const int ENEMY_ATTACK_WAIT_MAX = 12;   // el Darknut espera como maximo esto entre ataques (30 ticks = 1 s)
 static const float LINK_ATTACK_ANIM_BOOST = 1.30f;   // velocidad de los ataques de espada de Link (1.0 = normal)
+static const float GUARD_HIT_BAR_GAIN = 0.20f;   // la barra del enemigo sube esto al golpear su guardia (sin parry)
+static const int GANON_WAIT_MAX = 8;          // Ganondorf espera como maximo esto antes de atacar
 static const int BASH_COOLDOWN_TICKS = 30;     // espera entre golpes de escudo: 30 = 1 s
 static const int DOUBLE_TAP_TICKS = 12;        // tiempo maximo entre las dos R seguidas (12 = 0.4 s)
 static const int PLAYER_STUN_TICKS = 90;     // tiempo que Link queda aturdido (90 = 3 s)
@@ -136,6 +138,9 @@ struct EnemyState {
     int secondTimer = 0;    // ventana del segundo tajo
     int holdTimer = 0;      // quieto mientras cae el segundo tajo
     bool lastWasA = false;
+    bool wasGuarding = false;   // estaba cubriendose el tick anterior
+    int guardPending = 0;       // ticks para confirmar que el tajo fue bloqueado (sin parry)
+    bool guardSawCut = false;
 
     // Solo para dibujar la barra
     bool hasScreen = false;
@@ -195,6 +200,9 @@ static int g_playerStunTimer = 0;       // ticks restantes aturdido
 static bool g_pendingPlayerStun = false; // hay que mostrar la animacion de aturdido (siguiente tick)
 static bool g_playerWasStunned = false;
 static float g_playerDispRatio = 0.0f;  // relleno mostrado (animado)
+static unsigned g_tickNow = 0;              // contador de ticks de Link
+static unsigned g_lastEnemyParryId = 0;     // ultimo enemigo que nos hizo parry
+static unsigned g_lastEnemyParryTick = 0;   // y en que tick
 static int g_enemyParryCancel = 0;      // ticks cancelando los golpes del tajo ya parrado
 static int g_enemyParryCooldown = 0;    // ticks sin volver a tirar la probabilidad (mismo tajo)
 
@@ -413,6 +421,20 @@ static void scan_tick(daAlink_c* link) {
 // se cancela, Link rebota, suena Midna Jump y se llena la barra de postura de Link.
 // Con la barra llena Link queda aturdido (sin escudo, sin ataques, sin moverse).
 template <typename Col>
+// El enemigo esta cubriendose con su espada / escudo.
+static bool enemy_is_guarding(fopAc_ac_c* ac) {
+    s16 nm = fopAcM_GetName(ac);
+    if (nm == fpcNm_B_TN_e) {
+        int a = ((daB_TN_c*)ac)->mActionMode1;
+        return a == daB_TN_c::ACT_GUARDH || a == daB_TN_c::ACT_GUARDL;
+    }
+    if (nm == fpcNm_E_DN_e) return ((e_dn_class*)ac)->action == 7;
+    if (nm == fpcNm_E_SF_e) return ((e_sf_class*)ac)->mAction == 7;
+    if (nm == fpcNm_E_KK_e) return ((daE_KK_c*)ac)->mActionMode == 6;
+    if (nm == fpcNm_B_GND_e) return ((b_gnd_class*)ac)->mActionMode == 12;   // DEFENCE
+    return false;
+}
+
 static bool enemy_hit_by(Col& col, fopAc_ac_c** outEnemy) {
     if (!col.ChkAtHit()) return false;
     fopAc_ac_c* ac = col.GetAtHitAc();
@@ -505,7 +527,19 @@ static void enemy_parry_tick(daAlink_c* link) {
         if (st.stunTimer > 0 || st.secondTimer > 0 || st.holdTimer > 0) return;
     }
 
-    if (cM_rndF(1.0f) >= ENEMY_PARRY_CHANCE) return;
+    if (cM_rndF(1.0f) >= ENEMY_PARRY_CHANCE) {
+        // Sin parry: si el golpe cayo sobre su guardia, su barra sube 20%
+        if (enemy_is_guarding(enemy)) {
+            EnemyState& gst = g_enemies[fopAcM_GetID(enemy)];
+            gst.parries += GUARD_HIT_BAR_GAIN;
+            if (gst.parries >= 0.9f) {
+                gst.parries = 1.0f;
+                gst.stunTimer = STUN_TICKS;
+                svc_log->info(mod_ctx, "GUARDIA golpeada: enemigo aturdido");
+            }
+        }
+        return;
+    }
 
     // El enemigo hizo parry!
     {
@@ -514,6 +548,8 @@ static void enemy_parry_tick(daAlink_c* link) {
         if (est.parries < 0.0f) est.parries = 0.0f;
     }
     g_enemyParryCancel = 24;
+    g_lastEnemyParryId = (unsigned)fopAcM_GetID(enemy);
+    g_lastEnemyParryTick = g_tickNow;
     cancel_hit(link->mAtCps[0]);
     cancel_hit(link->mAtCps[1]);
     cancel_hit(link->mAtCps[2]);
@@ -612,6 +648,38 @@ static void unguard_exposed(fopAc_ac_c* ac, s16 nm) {
     }
 }
 
+// El enemigo se esta cubriendo con la espada / el escudo.
+static bool is_guarding(fopAc_ac_c* ac, s16 nm) {
+    if (nm == fpcNm_B_TN_e) {
+        int a = ((daB_TN_c*)ac)->mActionMode1;
+        return a == daB_TN_c::ACT_GUARDH || a == daB_TN_c::ACT_GUARDL;
+    }
+    if (nm == fpcNm_E_DN_e) return ((e_dn_class*)ac)->action == 7;
+    if (nm == fpcNm_E_SF_e) return ((e_sf_class*)ac)->mAction == 7;
+    if (nm == fpcNm_E_KK_e) return ((daE_KK_c*)ac)->mActionMode == 6;
+    if (nm == fpcNm_B_GND_e) return ((b_gnd_class*)ac)->mActionMode == 12;   // DEFENCE
+    return false;
+}
+
+// Cubrirse ante un tajo de Link sube 20% la barra del enemigo, salvo que nos haga parry.
+static void guard_bar_tick(fopAc_ac_c* ac, s16 nm) {
+    EnemyState& st = g_enemies[fopAcM_GetID(ac)];
+    bool g = is_guarding(ac, nm);
+    if (g && !st.wasGuarding) { st.guardPending = 15; st.guardSawCut = false; }
+    st.wasGuarding = g;
+    if (st.guardPending > 0) {
+        daPy_py_c* pl = daPy_getPlayerActorClass();
+        if (pl != nullptr && pl->getCutAtFlg()) st.guardSawCut = true;
+        bool parried = g_lastEnemyParryId == (unsigned)fopAcM_GetID(ac) && g_tickNow - g_lastEnemyParryTick < 30;
+        if (parried) {
+            st.guardPending = 0;
+        } else if (--st.guardPending == 0 && st.guardSawCut) {
+            st.parries += 0.20f;
+            if (st.parries > 0.85f) st.parries = 0.85f;   // cubrirse solo no basta para aturdirlo
+        }
+    }
+}
+
 static void* tweak_enemy(void* p, void*) {
     fopAc_ac_c* ac = (fopAc_ac_c*)p;
     if (ac == nullptr) return nullptr;
@@ -627,6 +695,24 @@ static void* tweak_enemy(void* p, void*) {
                 return nullptr;
             }
         }
+    }
+
+    if (is_parry_enemy(ac)) guard_bar_tick(ac, nm);
+
+    // Ganondorf (duelo a pie): espera menos entre ataques para no quedarse quieto
+    if (nm == fpcNm_B_GND_e) {
+        b_gnd_class* g = (b_gnd_class*)ac;
+        if (g->mDrawHorse == 0 && g->mActionMode == 10 && (g->mMoveMode == 1 || g->mMoveMode == 2)) {   // WAIT
+            if (g->field_0xc44[0] > 6) g->field_0xc44[0] = 6;
+        }
+        return nullptr;
+    }
+
+    if (nm == fpcNm_B_GND_e) {           // Ganondorf: ataca mas seguido (sin acelerar sus golpes)
+        b_gnd_class* g = (b_gnd_class*)ac;
+        if (g->mDrawHorse == 0 && g->mActionMode == 10 && g->mMoveMode == 2 && g->field_0xc44[0] > GANON_WAIT_MAX)
+            g->field_0xc44[0] = GANON_WAIT_MAX;
+        return nullptr;
     }
 
     if (nm != fpcNm_E_DN_e && nm != fpcNm_E_OC_e && nm != fpcNm_B_TN_e &&
@@ -715,6 +801,7 @@ static bool link_in_combo_attack(daAlink_c* link) {
 
 // Cada tick de Link.
 static HookAction on_execute_pre_main(ModContext*, void* args, void*, void*) {
+    g_tickNow++;
     daAlink_c* link = mods::arg<daAlink_c*>(args, 0);
 
     if (g_parryTimer > 0) g_parryTimer--;
@@ -811,14 +898,15 @@ static HookAction on_execute_pre_main(ModContext*, void* args, void*, void*) {
         }
         bool busy = g_comboBusy > 0 || link_in_combo_attack(link);
         if (stp && (stp->stunTimer > 0 || stp->secondTimer > 0)) {
-            // Parry final: solo giratorio y Helm Splitter, orden aleatorio; uno termina antes del otro
+            // Parry final: Mortal Draw y Helm Splitter (sin giratorio); uno termina antes del otro
             if (!busy) {
                 if (stp->stunTimer > 0) {
                     launch_followup(link, trigA ? 2 : 0);   // A: Helm Splitter / B: Mortal Draw
+                    stp->lastWasA = !trigA;                 // true = el primero fue Mortal Draw
                     stp->stunTimer = 0;
                     stp->secondTimer = SECOND_SLASH_TICKS;
                 } else {
-                    launch_followup(link, trigA ? 2 : 1);   // A: Helm Splitter / B: giratorio
+                    launch_followup(link, stp->lastWasA ? 2 : 0);   // el otro: tras Mortal Draw, Helm Splitter; tras Helm Splitter, Mortal Draw
                     stp->secondTimer = 0;
                     stp->holdTimer = HOLD_AFTER_TICKS;
                     stp->parries = 0;
