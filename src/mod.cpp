@@ -106,8 +106,8 @@ static const float PLAYER_BAR_DRAIN_TICKS = 7.5f;   // la barra de Link llega a 
 static const float PARRY_POSTURE_RESTORE = 0.25f;   // cada parry de Link recupera este % de su barra
 static const float ENEMY_BAR_DECAY_PER_SEC = 0.015f;   // la barra del enemigo baja 1.5%/s (la de Link: 2%/s)
 static const int PARRIES_TO_STUN = 2;        // parries para llenar la barra
-static const int STUN_TICKS = 75;            // tiempo aturdido para empezar los tajos (2.5 s)
-static const int STUN_TICKS_SHORT = 45;           // aturdimiento corto (1.5 s), 50% de probabilidad
+static const int STUN_TICKS = 90;            // aturdimiento largo (3 s)
+static const int STUN_TICKS_SHORT = 51;           // aturdimiento corto (1.7 s), 50% de probabilidad
 static const int SECOND_SLASH_TICKS = 150;    // tiempo para el segundo tajo
 static const int HOLD_AFTER_TICKS = 20;      // enemigo quieto mientras cae el segundo tajo
 static const int ATTACK_LOCK_TICKS = 0;      // sin atacar tras un parry normal (0 = desactivado; 60 = 2 s)
@@ -239,7 +239,7 @@ static void on_bash_proc_post(ModContext*, void* args, void*, void*) {
 }
 
 // Un golpe pego en el escudo.
-// Duracion del aturdimiento: 50% largo (2.5 s), 50% corto (1.5 s)
+// Duracion del aturdimiento: 50% largo (3 s), 50% corto (1.7 s)
 static int random_stun_ticks() {
     return cM_rndF(1.0f) < 0.5f ? STUN_TICKS : STUN_TICKS_SHORT;
 }
@@ -715,6 +715,9 @@ static HookAction on_tn_set_damage_pre(ModContext*, void* args, void*, void*) {
     return HOOK_CONTINUE;
 }
 
+struct HealthTrack { int last = 0; float carry = 0.0f; };
+static std::unordered_map<uint32_t, HealthTrack> g_health;
+
 // Ganondorf: el juego lo da por vencido al tercer derribo (field_0x1e0c cuenta derribos y con >= 3
 // hace la caida final). Se cuentan los derribos aqui y el contador del juego se mantiene en 0
 // hasta el ultimo derribo, que se deja en 2 para que el siguiente (+1) sea el tercero.
@@ -732,12 +735,25 @@ static void ganon_knockdowns(fopAc_ac_c* ac) {
         t.downs = 0;                                          // derribo final en curso
     }
     t.prev = mode;
+
+    // Barra de vida: no se reinicia en cada derribo. Baja por tramos (100, 84, 68, 52, 36) y dentro
+    // de cada tramo con los golpes; el juego pone health = 100 al derribar y aqui se corrige.
+    int ceilHp = 100 - 16 * (t.downs > 4 ? 4 : t.downs);
+    int floorHp = ceilHp - 19;
+    int hp = (int)g->health;
+    if (hp > ceilHp) hp = ceilHp;
+    if (hp < floorHp) hp = floorHp;
+    if (hp != (int)g->health) {
+        g->health = (s16)hp;
+        g_health[(uint32_t)fopAcM_GetID(ac)].last = hp;
+    }
 }
 
 // Dano de Link reducido: cada tick se compara la vida del enemigo con la del tick anterior;
 // si bajo, se devuelve la parte que sobra (con acumulador para no perder los decimales).
-struct HealthTrack { int last = 0; float carry = 0.0f; };
-static std::unordered_map<uint32_t, HealthTrack> g_health;
+
+struct TnLife { int last = 0; float carry = 0.0f; };
+static std::unordered_map<uint32_t, TnLife> g_tnLife;
 
 static void reduce_link_damage(fopAc_ac_c* ac) {
     s16 nm = fopAcM_GetName(ac);
@@ -748,13 +764,19 @@ static void reduce_link_damage(fopAc_ac_c* ac) {
     else if (nm == fpcNm_B_TN_e) {                                // Darknut: mas vida
         mult = 0.35f; cap = 2.0f;
         daB_TN_c* tn = (daB_TN_c*)ac;
-        // El juego pone la vida maxima de la fase sin armadura (field_0x700) cada tick: se multiplica.
-        static std::unordered_map<uint32_t, int> written;   // ultimo valor que escribio el mod
-        int& w = written[(uint32_t)fopAcM_GetID(ac)];
-        if (tn->field_0x700 != w) {                           // valor original del juego
-            w = (int)((float)tn->field_0x700 * DARKNUT_LIFE_MULT);
-            tn->field_0x700 = w;
+        // Vida de la fase sin armadura: el juego acumula dano en field_0x6fc y termina al llegar a
+        // field_0x700. Se reduce lo que se acumula (asi las barras de vida de otros mods, que leen
+        // estos dos valores, siguen siendo coherentes con el final real de la pelea).
+        TnLife& tl = g_tnLife[(uint32_t)fopAcM_GetID(ac)];
+        int cur = tn->field_0x6fc;
+        if (cur > tl.last && DARKNUT_LIFE_MULT > 1.0f) {
+            float d = (float)(cur - tl.last) / DARKNUT_LIFE_MULT + tl.carry;
+            int real = (int)d;
+            tl.carry = d - (float)real;
+            cur = tl.last + real;
+            tn->field_0x6fc = cur;
         }
+        tl.last = cur;
     }
     if (mult >= 0.999f && cap <= 0.0f) return;
     HealthTrack& t = g_health[(uint32_t)fopAcM_GetID(ac)];
@@ -1320,6 +1342,7 @@ MOD_EXPORT ModResult mod_shutdown(ModError*) {
     // El loader quita los hooks solo al desactivar el mod.
     g_enemies.clear();
     g_health.clear();
+    g_tnLife.clear();
     g_gnd.clear();
     g_tnArmorHits.clear();
 #if ENEMY_TWEAKS
