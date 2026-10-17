@@ -111,8 +111,9 @@ static const float ENEMY_PARRY_CHANCE = 0.50f;  // probabilidad de que un enemig
 static const float ENEMY_ATTACK_ANIM_BOOST = 1.25f;   // velocidad de los movimientos de ataque enemigos (1.0 = normal)
 static const int ENEMY_ATTACK_WAIT_MAX = 12;   // el Darknut espera como maximo esto entre ataques (30 ticks = 1 s)
 static const float LINK_ATTACK_ANIM_BOOST = 1.30f;   // velocidad de los ataques de espada de Link (1.0 = normal)
-static const float GUARD_HIT_BAR_GAIN = 0.20f;   // la barra del enemigo sube esto al golpear su guardia (sin parry)
+static const float GUARD_HIT_BAR_GAIN = 0.13f;   // la barra del enemigo sube esto al golpear su guardia (sin parry)
 static const int GANON_WAIT_MAX = 8;          // Ganondorf espera como maximo esto antes de atacar
+static const float ENEMY_PARRY_POSTURE_GAIN = 0.30f;   // la barra de Link sube esto cuando un enemigo le hace parry
 static const int BASH_COOLDOWN_TICKS = 30;     // espera entre golpes de escudo: 30 = 1 s
 static const int DOUBLE_TAP_TICKS = 12;        // tiempo maximo entre las dos R seguidas (12 = 0.4 s)
 static const int PLAYER_STUN_TICKS = 90;     // tiempo que Link queda aturdido (90 = 3 s)
@@ -434,9 +435,12 @@ static bool enemy_is_guarding(fopAc_ac_c* ac) {
     return false;
 }
 
+static bool g_hitShield = false;   // el golpe de Link cayo sobre el escudo del enemigo
+
 template <typename Col>
 static bool enemy_hit_by(Col& col, fopAc_ac_c** outEnemy) {
     if (!col.ChkAtHit()) return false;
+    if (col.ChkAtShieldHit()) g_hitShield = true;
     fopAc_ac_c* ac = col.GetAtHitAc();
     if (!ac || fopAcM_GetGroup(ac) != fopAc_ENEMY_e) return false;
     *outEnemy = ac;
@@ -502,6 +506,7 @@ static void enemy_parry_tick(daAlink_c* link) {
 
     fopAc_ac_c* enemy = nullptr;
     bool hit = false;
+    g_hitShield = false;
     hit |= enemy_hit_by(link->mAtCps[0], &enemy);
     hit |= enemy_hit_by(link->mAtCps[1], &enemy);
     hit |= enemy_hit_by(link->mAtCps[2], &enemy);
@@ -529,7 +534,7 @@ static void enemy_parry_tick(daAlink_c* link) {
 
     if (cM_rndF(1.0f) >= ENEMY_PARRY_CHANCE) {
         // Sin parry: si el golpe cayo sobre su guardia, su barra sube 20%
-        if (enemy_is_guarding(enemy)) {
+        if (enemy_is_guarding(enemy) || g_hitShield) {
             EnemyState& gst = g_enemies[fopAcM_GetID(enemy)];
             gst.parries += GUARD_HIT_BAR_GAIN;
             if (gst.parries >= 0.9f) {
@@ -561,7 +566,7 @@ static void enemy_parry_tick(daAlink_c* link) {
     dComIfGp_getVibration().StartShock(VIBMODE_S_POWER4, 1, cXyz(0.0f, 1.0f, 0.0f));
     parry_camera_shake();
 
-    g_playerPosture += 1.0f / (float)PARRIES_TO_STUN;
+    g_playerPosture += ENEMY_PARRY_POSTURE_GAIN;
     if (g_playerPosture >= 0.999f) {
         g_playerPosture = 1.0f;
         g_playerStunTimer = PLAYER_STUN_TICKS;
@@ -905,8 +910,9 @@ static HookAction on_execute_pre_main(ModContext*, void* args, void*, void*) {
                     stp->lastWasA = !trigA;                 // true = el primero fue Mortal Draw
                     stp->stunTimer = 0;
                     stp->secondTimer = SECOND_SLASH_TICKS;
-                } else {
-                    launch_followup(link, stp->lastWasA ? 2 : 0);   // el otro: tras Mortal Draw, Helm Splitter; tras Helm Splitter, Mortal Draw
+                } else if (stp->lastWasA ? trigA : trigB) {
+                    // segundo ataque: solo con su propio boton (A = Helm Splitter, B = Mortal Draw)
+                    launch_followup(link, stp->lastWasA ? 2 : 0);
                     stp->secondTimer = 0;
                     stp->holdTimer = HOLD_AFTER_TICKS;
                     stp->parries = 0;
