@@ -119,6 +119,8 @@ static const float GUARD_HIT_BAR_GAIN = 0.13f;   // la barra del enemigo sube es
 static const int GANON_WAIT_MAX = 8;          // Ganondorf espera como maximo esto antes de atacar
 static const float ENEMY_PARRY_POSTURE_GAIN = 0.30f;   // la barra de Link sube esto cuando un enemigo le hace parry
 static const float LINK_DAMAGE_MULT = 0.60f;   // dano de Link a los enemigos de la lista (1.0 = normal; 0.6 = 40% menos)
+static const float DARKNUT_LIFE_MULT = 2.5f;      // vida de la fase sin armadura del Darknut (1.0 = normal)
+static const int DARKNUT_HITS_PER_PIECE = 3;   // golpes para romper cada pieza de armadura del Darknut (1 = normal)
 static const int BASH_COOLDOWN_TICKS = 30;     // espera entre golpes de escudo: 30 = 1 s
 static const int DOUBLE_TAP_TICKS = 12;        // tiempo maximo entre las dos R seguidas (12 = 0.4 s)
 static const int PLAYER_STUN_TICKS = 90;     // tiempo que Link queda aturdido (90 = 3 s)
@@ -696,18 +698,19 @@ static void guard_bar_tick(fopAc_ac_c* ac, s16 nm) {
     }
 }
 
-// Darknut: cada pieza de armadura necesita 2 golpes. El juego rompe una pieza por golpe
-// (setDamage suma 1 a mNextBreakPart); en los golpes impares se le pasa 0, asi la pieza aguanta.
+// Darknut: cada pieza de armadura necesita varios golpes. El juego rompe una pieza por golpe
+// (setDamage suma 1 a mNextBreakPart); en los golpes intermedios se le pasa 0 y la pieza aguanta.
 static std::unordered_map<uint32_t, int> g_tnArmorHits;
 
 static HookAction on_tn_set_damage_pre(ModContext*, void* args, void*, void*) {
+    if (DARKNUT_HITS_PER_PIECE <= 1) return HOOK_CONTINUE;
     daB_TN_c* tn = mods::arg<daB_TN_c*>(args, 0);
     int& amount = mods::arg_ref<int>(args, 2);
     if (tn == nullptr || amount != 1) return HOOK_CONTINUE;          // bombas (2) no se tocan
     if (tn->mActionMode1 >= 8 || tn->mNextBreakPart >= 11) return HOOK_CONTINUE;   // solo con armadura
     int& hits = g_tnArmorHits[(uint32_t)fopAcM_GetID(tn)];
     hits++;
-    if (hits & 1) amount = 0;   // 1er golpe: la armadura aguanta; 2do: se rompe
+    if (hits % DARKNUT_HITS_PER_PIECE != 0) amount = 0;   // la pieza aguanta; se rompe con el ultimo golpe
     return HOOK_CONTINUE;
 }
 
@@ -721,8 +724,18 @@ static void reduce_link_damage(fopAc_ac_c* ac) {
     // Multiplicador y tope de dano por golpe segun el enemigo (tope 0 = sin tope).
     float mult = LINK_DAMAGE_MULT;
     float cap = 0.0f;
-    if (nm == fpcNm_B_GND_e) { mult = 0.50f; cap = 2.0f; }        // Ganondorf: el remate del combo de B no quita de mas
-    else if (nm == fpcNm_B_TN_e) { mult = 0.35f; cap = 2.0f; }    // Darknut: peleas mas largas
+    if (nm == fpcNm_B_GND_e) { mult = 0.30f; cap = 1.5f; }        // Ganondorf: el remate del combo de B no quita de mas
+    else if (nm == fpcNm_B_TN_e) {                                // Darknut: mas vida
+        mult = 0.35f; cap = 2.0f;
+        daB_TN_c* tn = (daB_TN_c*)ac;
+        // El juego pone la vida maxima de la fase sin armadura (field_0x700) cada tick: se multiplica.
+        static std::unordered_map<uint32_t, int> written;   // ultimo valor que escribio el mod
+        int& w = written[(uint32_t)fopAcM_GetID(ac)];
+        if (tn->field_0x700 != w) {                           // valor original del juego
+            w = (int)((float)tn->field_0x700 * DARKNUT_LIFE_MULT);
+            tn->field_0x700 = w;
+        }
+    }
     if (mult >= 0.999f && cap <= 0.0f) return;
     HealthTrack& t = g_health[(uint32_t)fopAcM_GetID(ac)];
     int now = (int)ac->health;
