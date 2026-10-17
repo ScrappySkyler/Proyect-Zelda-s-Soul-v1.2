@@ -420,7 +420,6 @@ static void scan_tick(daAlink_c* link) {
 // Al tirar un tajo, si pega a un enemigo hay 30% de que el enemigo haga parry: el golpe
 // se cancela, Link rebota, suena Midna Jump y se llena la barra de postura de Link.
 // Con la barra llena Link queda aturdido (sin escudo, sin ataques, sin moverse).
-template <typename Col>
 // El enemigo esta cubriendose con su espada / escudo.
 static bool enemy_is_guarding(fopAc_ac_c* ac) {
     s16 nm = fopAcM_GetName(ac);
@@ -435,6 +434,7 @@ static bool enemy_is_guarding(fopAc_ac_c* ac) {
     return false;
 }
 
+template <typename Col>
 static bool enemy_hit_by(Col& col, fopAc_ac_c** outEnemy) {
     if (!col.ChkAtHit()) return false;
     fopAc_ac_c* ac = col.GetAtHitAc();
