@@ -158,6 +158,8 @@ struct EnemyState {
     float sx = 0.0f, sy = 0.0f;   // posicion suavizada en pantalla
     float heightOff = 0.0f;       // altura de la cabeza suavizada
     float dispRatio = 0.0f;       // relleno mostrado (animado)
+    int maxHp = 0;                // vida maxima vista (para la barra de vida)
+    float hpDisp = 1.0f;          // vida mostrada (animada)
 };
 
 static std::unordered_map<uint32_t, EnemyState> g_enemies;
@@ -1098,6 +1100,7 @@ struct BarInfo {
     float width;     // ancho en pixeles
     bool stunned;    // barra llena / aturdido: se ilumina
     int neon = 0;       // 0 dorado, 1 verde neon (3 s), 2 naranja neon (1.7 s)
+    bool hp = false;    // barra de vida del enemigo (relleno rojo)
 };
 static std::vector<BarInfo> g_bars;
 
@@ -1191,6 +1194,7 @@ public:
                 u8 rb = 255;
                 u8 gb = bar.stunned ? (u8)(255 - 110 * pulse) : (u8)255;
                 u8 bb = bar.stunned ? (u8)(255 - 200 * pulse) : (u8)255;
+                if (bar.hp) { rb = 255; gb = 35; bb = 35; }
                 if (bar.stunned && bar.neon == 1) { rb = 57;  gb = 255; bb = 20; }
                 if (bar.stunned && bar.neon == 2) { rb = 255; gb = 130; bb = 0; }
                 draw_quad(left + bar.width * FILL_U0, top,
@@ -1202,6 +1206,29 @@ public:
 };
 
 static ParryBarDraw g_barDraw;
+
+// Vida restante del enemigo, 0..1
+static float enemy_hp_ratio(fopAc_ac_c* ac, EnemyState& st) {
+    s16 nm = fopAcM_GetName(ac);
+    float r;
+    if (nm == fpcNm_B_GND_e) {
+        r = ((float)((b_gnd_class*)ac)->health - 17.0f) / 83.0f;
+    } else if (nm == fpcNm_B_TN_e) {
+        daB_TN_c* tn = (daB_TN_c*)ac;
+        if (tn->mActionMode1 < 8) {                       // fase con armadura: primera mitad
+            float parts = (float)tn->mNextBreakPart / 11.0f;
+            r = 1.0f - 0.5f * (parts > 1.0f ? 1.0f : parts);
+        } else {                                          // sin armadura: segunda mitad
+            float d = tn->field_0x700 > 0 ? (float)tn->field_0x6fc / (float)tn->field_0x700 : 0.0f;
+            r = 0.5f * (1.0f - (d > 1.0f ? 1.0f : d));
+        }
+    } else {
+        int hp = (int)ac->health;
+        if (hp > st.maxHp) st.maxHp = hp;
+        r = st.maxHp > 0 ? (float)hp / (float)st.maxHp : 0.0f;
+    }
+    return r < 0.0f ? 0.0f : (r > 1.0f ? 1.0f : r);
+}
 
 // Despues de dibujar a Link: calcula donde va la barra del enemigo fijado.
 static void on_link_draw_post(ModContext*, void* args, void*, void*) {
@@ -1277,6 +1304,13 @@ static void on_link_draw_post(ModContext*, void* args, void*, void*) {
     st.dispRatio += (goal - st.dispRatio) * FILL_SMOOTHING;
     if (std::fabs(goal - st.dispRatio) < 0.003f) st.dispRatio = goal;
 
+    {   // Barra de vida (roja) justo encima de la barra de postura
+        float goalHp = enemy_hp_ratio(target, st);
+        st.hpDisp += (goalHp - st.hpDisp) * FILL_SMOOTHING;
+        if (std::fabs(goalHp - st.hpDisp) < 0.003f) st.hpDisp = goalHp;
+        float bh = BAR_WIDTH * (float)BAR_TEX_H / (float)BAR_TEX_W;
+        g_bars.push_back({st.sx, st.sy - bh * 1.4f, st.hpDisp, BAR_WIDTH, false, 0, true});
+    }
     g_bars.push_back({st.sx, st.sy, st.dispRatio, BAR_WIDTH, exposed, exposed ? (st.stunLong ? 1 : 2) : 0});
     dComIfGd_set2DXlu(&g_barDraw);
 }
